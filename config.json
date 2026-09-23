@@ -1,0 +1,26 @@
+{
+  "app_name": "Image Cropper",
+  "tools": [
+    {
+      "id": "image-cropper",
+      "label": "Image Cropper",
+      "enabled": true,
+      "default": true,
+      "url": "/"
+    },
+    {
+      "id": "pdf-viewer",
+      "label": "PDF Viewer",
+      "enabled": false,
+      "default": false,
+      "url": "/pdf-viewer"
+    },
+    {
+      "id": "epub-validator",
+      "label": "EPUB Validator",
+      "enabled": false,
+      "default": false,
+      "url": "/epub-validator"
+    }
+  ]
+}
