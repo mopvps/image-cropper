@@ -1156,11 +1156,29 @@ document.getElementById('theme-toggle').onclick = () => {
   cmEditor?.setOption('theme', html.dataset.theme === 'dark' ? 'midnight' : 'default');
 };
 
+function toggleRightSidebar() {
+  const right = document.getElementById('right');
+  const btn = document.getElementById('rightToggleBtn');
+  const isCollapsed = right.classList.toggle('right-collapsed');
+  btn.textContent = isCollapsed ? '‹' : '›';
+  btn.title = isCollapsed ? 'Expand Images Panel (Ctrl+Shift+Enter)' : 'Collapse Images Panel (Ctrl+Shift+Enter)';
+}
+
+function toggleFullscreen() {
+  const isFull = document.body.classList.toggle('fullscreen-mode');
+  document.getElementById('fullscreenIcon').textContent = isFull ? '✕' : '⛶';
+  document.getElementById('fullscreenLabel').textContent = isFull ? 'Exit Fullscreen' : 'Fullscreen';
+  document.getElementById('fullscreenBtn').title = isFull ? 'Exit Fullscreen (Alt+Enter)' : 'Fullscreen (Alt+Enter)';
+}
+
 document.addEventListener('keydown', e => {
   if (cropModal.style.display !== 'none') return; // modal has its own key handling
   if (document.activeElement === document.getElementById('xhtmlEditor')) return; // editing XHTML
   if (e.altKey && e.key === 'c') { e.preventDefault(); toggleCropMode(); return; }
+  if (e.altKey && e.key === 'Enter') { e.preventDefault(); toggleFullscreen(); return; }
+  if (e.ctrlKey && e.shiftKey && e.key === 'Enter') { e.preventDefault(); toggleRightSidebar(); return; }
   if (e.key === 'Escape') {
+    if (document.body.classList.contains('fullscreen-mode')) { toggleFullscreen(); return; }
     // Clear search highlights
     if (searchResults.length) {
       searchResults.forEach(r => redrawPage(r.page));

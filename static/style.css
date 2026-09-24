@@ -303,6 +303,39 @@ body {
   display: block;
 }
 
+/* ── Fullscreen Mode ── */
+body.fullscreen-mode #header { display: none; }
+body.fullscreen-mode #left { display: none; }
+body.fullscreen-mode #right { display: none; }
+body.fullscreen-mode #middle-left { height: 100vh; }
+body.fullscreen-mode #middle-right { height: 100vh; }
+
+/* ── Right Sidebar Collapse ── */
+#right.right-collapsed {
+  width: 0;
+  overflow: hidden;
+  border-left: none;
+}
+#right.right-collapsed #chips-header {
+  display: none;
+}
+/* Keep toggle button visible when collapsed — float it on edge */
+#right.right-collapsed #rightToggleBtn {
+  display: block;
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+  padding: 8px 6px;
+  z-index: 100;
+  color: var(--accent);
+  font-size: 16px;
+}
+
 /* ── Right Panel (crop controls, chips, download) ── */
 #right {
   width: 260px;

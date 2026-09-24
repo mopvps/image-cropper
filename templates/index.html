@@ -118,6 +118,9 @@
         <span id="pdfZoomLevel" style="font-size:11px;color:var(--muted);min-width:36px;text-align:center;">100%</span>
         <button id="pdfZoomIn"  class="btn btn-secondary" style="padding:2px 8px;font-size:13px;">+</button>
         <button id="pdfZoomReset" class="btn btn-secondary" style="padding:2px 8px;font-size:11px;">↺</button>
+        <button id="fullscreenBtn" class="btn btn-secondary" onclick="toggleFullscreen()" title="Fullscreen (Alt+Enter)">
+          <span id="fullscreenIcon">⛶</span> <span id="fullscreenLabel">Fullscreen</span>
+        </button>
       </div>
     </div>
     <div id="canvas-wrap" style="position:relative;">
@@ -167,6 +170,9 @@
     <div id="chips-header">
       <span>Images</span>
       <span id="chips-count" style="color:var(--muted);font-weight:400">—</span>
+      <button id="rightToggleBtn" onclick="toggleRightSidebar()" title="Toggle Images Panel (Ctrl+Shift+Enter)"
+        style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;
+        padding:2px 4px;line-height:1;transition:color .15s;">›</button>
     </div>
     <div id="chips">
       <span style="font-size:12px;color:var(--muted)">Upload files to see image list</span>
