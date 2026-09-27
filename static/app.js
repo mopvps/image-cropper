@@ -2,6 +2,7 @@
    1. STATE VARIABLES
    ══════════════════════════════════════════════════════════ */
 let cmEditor = null; // CodeMirror instance
+let bqCmEditor = null; // CodeMirror for blockquote modal
 let cmSearchCursor = null;
 let cmSearchQuery  = '';
 let cmSearchMatches = [];
@@ -859,10 +860,729 @@ function initSelectionEdit() {
   xhtmlFrame.addEventListener('load', () => {
     try {
       const doc = xhtmlFrame.contentDocument || xhtmlFrame.contentWindow.document;
+
+      doc.body.setAttribute('contenteditable', 'true');
+      doc.body.setAttribute('spellcheck', 'false');
+      doc.body.style.outline = 'none';
+      doc.body.style.caretColor = '#2B3A9C';
+      doc.addEventListener('beforeinput', e => e.preventDefault(), true);
+
       doc.addEventListener('mouseup', onIframeMouseUp);
       doc.addEventListener('keyup',   onIframeMouseUp);
+      doc.addEventListener('keydown', e => {
+        if (!e.ctrlKey) return;
+        if (e.code === 'KeyB') { e.preventDefault(); wrapIframeSelection('<b>', '</b>'); }
+        else if (e.code === 'KeyI') { e.preventDefault(); wrapIframeSelection('<i>', '</i>'); }
+        else if (e.altKey && e.code === 'Equal') { e.preventDefault(); wrapIframeSelection('<sup>', '</sup>'); }
+        else if (e.altKey && e.code === 'Minus') { e.preventDefault(); wrapIframeSelection('<sub>', '</sub>'); }
+        else if (e.altKey && e.code === 'KeyQ') { e.preventDefault(); wrapIframeSelection('<span class="small-caps">', '</span>'); }
+      });
+
+      // Blockquote click handler — only active when hlBlockquote is checked
+      doc.addEventListener('click', e => {
+        if (!document.getElementById('hlBlockquote')?.checked) return;
+
+        // Find clicked blockquote
+        let el = e.target;
+        while (el && el.nodeName !== 'BODY') {
+          if (el.nodeName.toUpperCase() === 'BLOCKQUOTE') break;
+          el = el.parentNode;
+        }
+        if (!el || el.nodeName.toUpperCase() !== 'BLOCKQUOTE') return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Get DOM index of this blockquote
+        const allBQ  = Array.from(doc.querySelectorAll('blockquote'));
+        const bqIndex = allBQ.indexOf(el);
+
+        // Fetch raw source and extract this blockquote's raw HTML
+        fetch('/get-xhtml', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId })
+        })
+        .then(r => r.json())
+        .then(data => {
+          if (data.error) { showToast(data.error, 'fail'); return; }
+          const original = data.content.replace(/\r\n/g, '\n');
+
+          // Find Nth <blockquote> in source by counting
+          const bqPat = /<blockquote[\s>]/g;
+          let count = 0, m, bqStart = -1;
+          while ((m = bqPat.exec(original)) !== null) {
+            if (count === bqIndex) { bqStart = m.index; break; }
+            count++;
+          }
+          if (bqStart === -1) {
+            showToast('Could not locate blockquote in source', 'warn');
+            return;
+          }
+
+          const bqEnd = original.indexOf('</blockquote>', bqStart);
+          if (bqEnd === -1) {
+            showToast('Could not find closing </blockquote>', 'warn');
+            return;
+          }
+
+          const bqRaw = original.substring(bqStart, bqEnd + 13); // 13 = </blockquote>
+
+          // Store for save operations
+          window._bqRaw      = bqRaw;
+          window._bqOriginal = original;
+          window._bqStart    = bqStart;
+          window._bqEnd      = bqEnd + 13;
+
+          // Open modal
+          const modal = document.getElementById('blockquoteModal');
+          modal.style.display = 'flex';
+
+          // Init or update CodeMirror
+          const textarea = document.getElementById('blockquoteEditor');
+          if (!bqCmEditor) {
+            bqCmEditor = CodeMirror.fromTextArea(textarea, {
+              mode: 'xml',
+              theme: document.documentElement.getAttribute('data-theme') === 'dark'
+                ? 'midnight' : 'default',
+              lineNumbers: true,
+              lineWrapping: true,
+              indentWithTabs: false,
+              tabSize: 2,
+            });
+          }
+          bqCmEditor.setValue(bqRaw);
+          setTimeout(() => bqCmEditor.refresh(), 50);
+        })
+        .catch(e => showToast('Failed to load blockquote: ' + e.message, 'fail'));
+      });
+
+      let lastBackspaceTime = 0;
+      let lastDeleteTime    = 0;
+
+      doc.addEventListener('keydown', e => {
+        if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+        e.preventDefault(); // always block — designMode is on
+
+        const now = Date.now();
+
+        // Find parent <p> of cursor
+        const sel2 = doc.getSelection();
+        if (!sel2 || sel2.rangeCount === 0) return;
+        let pEl2 = sel2.getRangeAt(0).startContainer;
+        while (pEl2) {
+          if (pEl2.nodeType === Node.ELEMENT_NODE &&
+              pEl2.nodeName.toUpperCase() === 'P') break;
+          if (!pEl2.parentNode || pEl2.nodeName === 'BODY') {
+            pEl2 = null; break;
+          }
+          pEl2 = pEl2.parentNode;
+        }
+        if (!pEl2) return;
+
+        if (e.key === 'Backspace') {
+          if (now - lastBackspaceTime < 500) {
+            mergeParagraph(doc, pEl2, 'above');
+          }
+          lastBackspaceTime = now;
+        }
+
+        if (e.key === 'Delete') {
+          if (now - lastDeleteTime < 500) {
+            mergeParagraph(doc, pEl2, 'below');
+          }
+          lastDeleteTime = now;
+        }
+      });
+
+      let lastEnterTime = 0;
+      doc.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          const now = Date.now();
+          if (now - lastEnterTime < 500) {
+            e.preventDefault();
+            splitParagraphAtCursor(doc);
+          }
+          lastEnterTime = now;
+        }
+      });
     } catch(e) {}
   });
+}
+
+function getFirstTextNode(el) {
+  // Skip non-text nodes like <span epub:type="pagebreak"/>
+  for (const child of el.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE &&
+        child.textContent.trim().length > 0) return child;
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      const found = getFirstTextNode(child);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function getLastTextNode(el) {
+  const children = [...el.childNodes].reverse();
+  for (const child of children) {
+    if (child.nodeType === Node.TEXT_NODE &&
+        child.textContent.trim().length > 0) return child;
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      const found = getLastTextNode(child);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function splitParagraphAtCursor(doc) {
+  const sel = doc.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+
+  // Find parent <p>
+  let pEl = range.startContainer;
+  while (pEl) {
+    if (pEl.nodeType === Node.ELEMENT_NODE &&
+        pEl.nodeName.toUpperCase() === 'P') break;
+    if (!pEl.parentNode || pEl.nodeName === 'BODY' ||
+        pEl.nodeName === 'HTML') {
+      showToast('Cursor not inside a <p>', 'warn');
+      return;
+    }
+    pEl = pEl.parentNode;
+  }
+  if (!pEl) { showToast('Cursor not inside a <p>', 'warn'); return; }
+
+  // Get DOM index of this <p> among all <p> in document
+  const allP = Array.from(doc.querySelectorAll('p'));
+  const pIndex = allP.indexOf(pEl);
+  if (pIndex === -1) { showToast('Could not index paragraph', 'warn'); return; }
+
+  // Get cursor text node and offset
+  const anchorNode = range.startContainer;
+  const offset = range.startOffset;
+
+  if (anchorNode.nodeType !== Node.TEXT_NODE) {
+    showToast('Click inside text to split', 'warn');
+    return;
+  }
+
+  // Get safe ASCII text before and after cursor — used only to find
+  // split point WITHIN the already-located paragraph
+  function safePlainRun(str, direction) {
+    const cleaned = str.replace(/[^a-zA-Z0-9 .,;:()]/g, '|');
+    const runs = cleaned.split('|').filter(r => r.trim().length >= 3);
+    if (!runs.length) return '';
+    return direction === 'before'
+      ? runs[runs.length - 1].slice(-15)
+      : runs[0].slice(0, 15);
+  }
+
+  let beforeAnchor = safePlainRun(
+    anchorNode.textContent.substring(Math.max(0, offset - 80), offset),
+    'before'
+  );
+  let afterAnchor = safePlainRun(
+    anchorNode.textContent.substring(offset, offset + 80),
+    'after'
+  );
+
+  // Walk siblings if anchors empty
+  if (!beforeAnchor) {
+    let node = anchorNode.previousSibling;
+    while (node) {
+      const safe = safePlainRun(node.textContent || '', 'before');
+      if (safe) { beforeAnchor = safe; break; }
+      node = node.previousSibling;
+    }
+  }
+  if (!afterAnchor) {
+    let node = anchorNode.nextSibling;
+    while (node) {
+      const safe = safePlainRun(node.textContent || '', 'after');
+      if (safe) { afterAnchor = safe; break; }
+      node = node.nextSibling;
+    }
+  }
+
+  // If STILL no anchors, cursor is in a pure-entity/image only node
+  // Use full paragraph text position as fallback
+  if (!beforeAnchor && !afterAnchor) {
+    showToast('Click near plain text to split', 'warn');
+    return;
+  }
+
+  fetch('/get-xhtml', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) { showToast(data.error, 'fail'); return; }
+    const original = data.content.replace(/\r\n/g, '\n');
+    const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // Find Nth <p> in raw source by counting — same as mergeParagraph
+    function findNthP(source, n) {
+      const pattern = /<p[\s>]/g;
+      let count = 0;
+      let match;
+      while ((match = pattern.exec(source)) !== null) {
+        if (count === n) return match.index;
+        count++;
+      }
+      return -1;
+    }
+
+    const pIdx = findNthP(original, pIndex);
+    if (pIdx === -1) {
+      showToast('Could not locate paragraph in source', 'warn');
+      return;
+    }
+
+    // Get opening tag and find </p> to bound the search
+    const pTagEnd = original.indexOf('>', pIdx) + 1;
+    const openTag = original.substring(pIdx, pTagEnd);
+    const pClose  = original.indexOf('</p>', pTagEnd);
+    if (pClose === -1) {
+      showToast('Could not find closing </p>', 'warn');
+      return;
+    }
+
+    // Search for split point ONLY within this paragraph's content
+    const pContent = original.substring(pTagEnd, pClose);
+
+    // Build pattern — allow tags+entities between anchors (gap 400)
+    let pattern2;
+    if (beforeAnchor && afterAnchor) {
+      pattern2 = new RegExp(
+        '(' + escapeRe(beforeAnchor) + ')' +
+        '([\\s\\S]{0,400}?)' +
+        '(' + escapeRe(afterAnchor) + ')'
+      );
+    } else if (beforeAnchor) {
+      // Only before anchor — split right after it
+      pattern2 = new RegExp('(' + escapeRe(beforeAnchor) + ')([\\s\\S]{0,2}?)()');
+    } else {
+      // Only after anchor — split right before it
+      pattern2 = new RegExp('()([\\s\\S]{0,2}?)(' + escapeRe(afterAnchor) + ')');
+    }
+
+    const match = pattern2.exec(pContent);
+    if (!match) {
+      showToast('Could not locate split point in paragraph', 'warn');
+      return;
+    }
+
+    // splitIdx within pContent = end of match[1] + match[2]
+    const splitInContent = match.index + match[1].length + match[2].length;
+
+    // Absolute split index in original
+    const splitIdx = pTagEnd + splitInContent;
+
+    // Build two paragraphs
+    const part1 = original.substring(pTagEnd, splitIdx).trimEnd();
+    const part2 = original.substring(splitIdx, pClose).trimStart();
+
+    if (!part1 || !part2) {
+      showToast('Split point is at paragraph boundary', 'warn');
+      return;
+    }
+
+    const newParagraphs = openTag + part1 + '</p>\n' + openTag + part2 + '</p>';
+    const fullP = original.substring(pIdx, pClose + 4);
+    const updated = original.replace(fullP, newParagraphs);
+
+    return fetch('/save-xhtml', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, content: updated })
+    });
+  })
+  .then(r => r && r.json())
+  .then(data => {
+    if (!data) return;
+    if (data.error) { showToast(data.error, 'fail'); return; }
+    showToast('✓ Paragraph split', 'pass');
+    refreshXhtml();
+  })
+  .catch(e => showToast('Split failed: ' + e.message, 'fail'));
+}
+
+function mergeParagraph(doc, pEl, direction) {
+
+  let siblingEl = direction === 'above'
+    ? pEl.previousElementSibling
+    : pEl.nextElementSibling;
+
+  // Skip non-<p> siblings
+  while (siblingEl && siblingEl.nodeName.toUpperCase() !== 'P') {
+    siblingEl = direction === 'above'
+      ? siblingEl.previousElementSibling
+      : siblingEl.nextElementSibling;
+  }
+
+  if (!siblingEl) {
+    showToast('No adjacent paragraph to merge with', 'warn');
+    return;
+  }
+
+  const aboveEl = direction === 'above' ? siblingEl : pEl;
+  const belowEl = direction === 'above' ? pEl : siblingEl;
+
+  // Get index of aboveEl/belowEl among ALL <p> elements in the document
+  function getDomIndex(el) {
+    const allP = Array.from(doc.querySelectorAll('p'));
+    return allP.indexOf(el);
+  }
+
+  const aboveIndex = getDomIndex(aboveEl); // e.g. 5th <p> in doc
+  const belowIndex = getDomIndex(belowEl); // e.g. 6th <p> in doc
+
+  if (aboveIndex === -1 || belowIndex === -1) {
+    showToast('Could not index paragraphs', 'warn');
+    return;
+  }
+
+  fetch('/get-xhtml', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) { showToast(data.error, 'fail'); return; }
+
+    const original = data.content.replace(/\r\n/g, '\n');
+
+    // Find Nth <p> in raw source by counting occurrences
+    // Match opening <p tags only (not </p>)
+    function findNthP(source, n) {
+      const pattern = /<p[\s>]/g;
+      let count = 0;
+      let match;
+      while ((match = pattern.exec(source)) !== null) {
+        if (count === n) return match.index;
+        count++;
+      }
+      return -1;
+    }
+
+    const aboveIdx = findNthP(original, aboveIndex);
+    const belowIdx = findNthP(original, belowIndex);
+
+    if (aboveIdx === -1 || belowIdx === -1) {
+      showToast('Could not locate paragraphs in source', 'warn');
+      return;
+    }
+
+    // Find </p> of above paragraph — first </p> after aboveIdx
+    const aboveCloseIdx = original.indexOf('</p>', aboveIdx);
+    if (aboveCloseIdx === -1) {
+      showToast('Could not find </p> of above paragraph', 'warn');
+      return;
+    }
+
+    // Find end of below opening tag — first > after belowIdx
+    const belowTagEnd = original.indexOf('>', belowIdx) + 1;
+
+    // Verify below paragraph starts right after above closes
+    // (allow only whitespace/newlines between them)
+    const between = original.substring(aboveCloseIdx + 4, belowIdx);
+    if (between.trim() !== '') {
+      showToast('Paragraphs are not adjacent in source', 'warn');
+      return;
+    }
+
+    // THE MERGE: remove </p> + whitespace + <p...> boundary
+    // Keep above opening tag, join contents with single space
+    const updated = original.substring(0, aboveCloseIdx)
+      + ' '
+      + original.substring(belowTagEnd);
+
+    return fetch('/save-xhtml', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, content: updated })
+    });
+  })
+  .then(r => r && r.json())
+  .then(data => {
+    if (!data) return;
+    if (data.error) { showToast(data.error, 'fail'); return; }
+    showToast('✓ Paragraphs merged', 'pass');
+    refreshXhtml();
+  })
+  .catch(e => showToast('Merge failed: ' + e.message, 'fail'));
+}
+
+function wrapIframeSelection(open, close) {
+  try {
+    const doc = xhtmlFrame.contentDocument || xhtmlFrame.contentWindow.document;
+    const sel = doc.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.toString().trim()) return;
+
+    const range = sel.getRangeAt(0);
+    const selectedText = sel.toString();
+
+    // ── TAG NAME ──────────────────────────────────────────────
+    const tagMatch = open.match(/<(\w+)/);
+    const tagName  = tagMatch ? tagMatch[1].toLowerCase() : null;
+
+    // ── UNWRAP CHECK ──────────────────────────────────────────
+    // Walk up from commonAncestor to find if already wrapped in this tag
+    if (tagName) {
+      let node = range.commonAncestorContainer;
+      if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+      let cur = node;
+      while (cur && cur.nodeName !== 'BODY') {
+        const isMatch = cur.nodeName.toLowerCase() === tagName;
+        const isSmallCaps = open.includes('small-caps') &&
+          cur.nodeName.toLowerCase() === 'span' &&
+          cur.classList.contains('small-caps');
+
+        if (isMatch || isSmallCaps) {
+
+          // Get DOM index of this exact tag among all same tags
+          const cssSelector = isSmallCaps ? 'span.small-caps' : tagName;
+          const allTags  = Array.from(doc.querySelectorAll(cssSelector));
+          const tagIndex = allTags.indexOf(cur);
+
+          if (tagIndex === -1) {
+            showToast('Could not index tag', 'warn');
+            return;
+          }
+
+          fetch('/get-xhtml', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId })
+          })
+          .then(r => r.json())
+          .then(data => {
+            if (data.error) { showToast(data.error, 'fail'); return; }
+            const original = data.content.replace(/\r\n/g, '\n');
+
+            // Find Nth opening tag in source by counting
+            const openPat = isSmallCaps
+              ? /<span[^>]*class="[^"]*small-caps[^"]*"[^>]*>/g
+              : new RegExp('<' + tagName + '[\\s>]', 'g');
+
+            let count = 0;
+            let m;
+            let tagStart = -1;
+            while ((m = openPat.exec(original)) !== null) {
+              if (count === tagIndex) { tagStart = m.index; break; }
+              count++;
+            }
+
+            if (tagStart === -1) {
+              showToast('Could not locate tag in source', 'warn');
+              return;
+            }
+
+            // Find end of opening tag
+            const openEnd = original.indexOf('>', tagStart) + 1;
+
+            // Find matching closing tag after openEnd
+            const closeTag  = '</' + tagName + '>';
+            const tagEnd    = original.indexOf(closeTag, openEnd);
+            if (tagEnd === -1) {
+              showToast('Could not find closing tag', 'warn');
+              return;
+            }
+
+            // Extract inner content
+            const innerContent = original.substring(openEnd, tagEnd);
+
+            // Replace full tag with inner content only
+            const fullTag = original.substring(tagStart, tagEnd + closeTag.length);
+            const updated = original.slice(0, tagStart)
+              + innerContent
+              + original.slice(tagStart + fullTag.length);
+
+            return fetch('/save-xhtml', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ session_id: sessionId, content: updated })
+            });
+          })
+          .then(r => r && r.json())
+          .then(data => {
+            if (!data) return;
+            if (data.error) { showToast(data.error, 'fail'); return; }
+            showToast('✓ Tag removed', 'pass');
+            refreshXhtml();
+          })
+          .catch(err => showToast('Remove failed: ' + err.message, 'fail'));
+          return;
+        }
+        cur = cur.parentNode;
+      }
+    }
+
+    // ── WRAP ─────────────────────────────────────────────────
+    // Get DOM index of parent <p> to scope the search
+    let pEl = range.commonAncestorContainer;
+    if (pEl.nodeType === Node.TEXT_NODE) pEl = pEl.parentNode;
+    while (pEl && pEl.nodeName.toUpperCase() !== 'P') pEl = pEl.parentNode;
+    const allP   = pEl ? Array.from(doc.querySelectorAll('p')) : [];
+    const pIndex = pEl ? allP.indexOf(pEl) : -1;
+
+    // Safe ASCII anchors from text nodes around selection
+    function safePlainRun(str, dir) {
+      const cleaned = str.replace(/[^a-zA-Z0-9 .,;:()]/g, '|');
+      const runs = cleaned.split('|').filter(r => r.trim().length >= 3);
+      if (!runs.length) return '';
+      return dir === 'before'
+        ? runs[runs.length - 1].slice(-20)
+        : runs[0].slice(0, 20);
+    }
+
+    const startNode = range.startContainer;
+    const endNode   = range.endContainer;
+
+    let beforeAnchor = (startNode.nodeType === Node.TEXT_NODE)
+      ? safePlainRun(startNode.textContent.substring(0, range.startOffset), 'before')
+      : '';
+    let afterAnchor  = (endNode.nodeType === Node.TEXT_NODE)
+      ? safePlainRun(endNode.textContent.substring(range.endOffset), 'after')
+      : '';
+
+    // Walk siblings if anchors empty
+    if (!beforeAnchor && startNode.nodeType === Node.TEXT_NODE) {
+      let node = startNode.previousSibling;
+      while (node) {
+        const s = safePlainRun(node.textContent || '', 'before');
+        if (s) { beforeAnchor = s; break; }
+        node = node.previousSibling;
+      }
+    }
+    if (!afterAnchor && endNode.nodeType === Node.TEXT_NODE) {
+      let node = endNode.nextSibling;
+      while (node) {
+        const s = safePlainRun(node.textContent || '', 'after');
+        if (s) { afterAnchor = s; break; }
+        node = node.nextSibling;
+      }
+    }
+
+    fetch('/get-xhtml', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { showToast(data.error, 'fail'); return; }
+      const original = data.content.replace(/\r\n/g, '\n');
+      const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      let updated = null;
+
+      // Find paragraph scope in source using DOM index
+      function findNthP(source, n) {
+        const pat = /<p[\s>]/g;
+        let count = 0, m;
+        while ((m = pat.exec(source)) !== null) {
+          if (count === n) return m.index;
+          count++;
+        }
+        return -1;
+      }
+
+      let searchStart = 0;
+      let searchEnd   = original.length;
+      if (pIndex !== -1) {
+        const pStart = findNthP(original, pIndex);
+        if (pStart !== -1) {
+          const pClose = original.indexOf('</p>', pStart);
+          searchStart  = pStart;
+          searchEnd    = pClose !== -1 ? pClose + 4 : original.length;
+        }
+      }
+      const scope = original.substring(searchStart, searchEnd);
+
+      // Strategy A: anchor-based within paragraph scope
+      if (beforeAnchor || afterAnchor) {
+        const pat = new RegExp(
+          (beforeAnchor ? escapeRe(beforeAnchor) : '') +
+          '([\\s\\S]{1,400}?)' +
+          (afterAnchor  ? escapeRe(afterAnchor)  : '')
+        );
+        const m = pat.exec(scope);
+        if (m) {
+          const rawMiddle = m[1];
+          const wrapped   = (beforeAnchor || '') + open + rawMiddle + close + (afterAnchor || '');
+          const scopeUpdated = scope.slice(0, m.index) + wrapped + scope.slice(m.index + m[0].length);
+          updated = original.substring(0, searchStart) + scopeUpdated + original.substring(searchEnd);
+        }
+      }
+
+      // Strategy B: exact selectedText within scope
+      if (updated === null && scope.includes(selectedText)) {
+        const idx = scope.indexOf(selectedText);
+        const scopeUpdated = scope.substring(0, idx) + open + selectedText + close + scope.substring(idx + selectedText.length);
+        updated = original.substring(0, searchStart) + scopeUpdated + original.substring(searchEnd);
+      }
+
+      if (updated === null) {
+        showToast('Could not locate selection in source', 'warn');
+        return null;
+      }
+
+      return fetch('/save-xhtml', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, content: updated })
+      });
+    })
+    .then(r => r && r.json())
+    .then(data => {
+      if (!data) return;
+      if (data.error) { showToast(data.error, 'fail'); return; }
+      showToast('✓ Saved', 'pass');
+      refreshXhtml();
+    })
+    .catch(e => showToast('Wrap failed: ' + e.message, 'fail'));
+
+  } catch(e) {
+    showToast('Wrap failed: ' + e.message, 'fail');
+  }
+}
+
+function removeTag(tagEl) {
+  try {
+    const tagName     = tagEl.tagName.toLowerCase();
+    const isSmallCaps = tagName === 'span' && tagEl.classList.contains('small-caps');
+    const innerHTML   = tagEl.innerHTML;
+    const outerHTML   = tagEl.outerHTML;
+
+    fetch('/remove-tag-eraser', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        outer_html: outerHTML,
+        inner_html: innerHTML,
+        tag_name:   tagName,
+        is_small_caps: isSmallCaps
+      })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { showToast(data.error, 'fail'); return; }
+      showToast('✓ Tag removed', 'pass');
+      refreshXhtml();
+      // re-injection now handled by xhtmlFrame 'load' event
+    })
+    .catch(err => showToast('Save failed: ' + err.message, 'fail'));
+
+  } catch(err) {
+    showToast('Error: ' + err.message, 'fail');
+  }
 }
 
 function onIframeMouseUp() {
@@ -870,6 +1590,10 @@ function onIframeMouseUp() {
     const doc = xhtmlFrame.contentDocument || xhtmlFrame.contentWindow.document;
     const sel = doc.getSelection();
     const text = sel ? sel.toString().trim() : '';
+    const removeBtn = document.getElementById('removeTagBtn');
+
+    // Hide remove tag button by default
+    if (removeBtn) removeBtn.style.display = 'none';
 
     if (!text || text.length < 2) {
       selectionEditBtn.style.display = 'none';
@@ -880,9 +1604,9 @@ function onIframeMouseUp() {
 
     lastSelectedText = text;
 
-    // Grab surrounding context (~60 chars around selection) for better matching
+    // Grab surrounding context
     try {
-      const range    = sel.getRangeAt(0);
+      const range     = sel.getRangeAt(0);
       const container = range.startContainer;
       const fullText  = container.textContent || '';
       const offset    = range.startOffset;
@@ -893,8 +1617,25 @@ function onIframeMouseUp() {
       lastSelectionContext = text;
     }
 
-    // Position the floating button near selection
-    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    // Check if selection is inside a removable tag
+    const REMOVABLE = ['B', 'STRONG', 'I', 'EM', 'SUP', 'SUB'];
+    let node = sel.getRangeAt(0).commonAncestorContainer;
+    if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+
+    let removableEl = null;
+    let current = node;
+    while (current && current.tagName && current.tagName !== 'BODY') {
+      const isSmallCaps = current.tagName === 'SPAN' && current.classList.contains('small-caps');
+      if (REMOVABLE.includes(current.tagName) || isSmallCaps) {
+        removableEl = current;
+        break;
+      }
+      current = current.parentNode;
+    }
+
+    // Position both buttons near selection
+    const range    = sel.getRangeAt(0);
+    const rect     = range.getBoundingClientRect();
     const frameRect = xhtmlFrame.getBoundingClientRect();
     const x = frameRect.left + rect.left + rect.width / 2 - 30;
     const y = frameRect.top  + rect.top  - 36;
@@ -902,10 +1643,55 @@ function onIframeMouseUp() {
     selectionEditBtn.style.left    = Math.max(0, x) + 'px';
     selectionEditBtn.style.top     = Math.max(0, y) + 'px';
     selectionEditBtn.style.display = 'block';
+
+    // Only show Remove Tag button if inside a removable tag
+    if (removableEl && removeBtn) {
+      removeBtn.style.left    = Math.max(0, x + 80) + 'px';
+      removeBtn.style.top     = Math.max(0, y) + 'px';
+      removeBtn.style.display = 'block';
+      removeBtn._targetEl     = removableEl;
+    }
+
   } catch(e) {
     selectionEditBtn.style.display = 'none';
   }
 }
+
+document.getElementById('removeTagBtn')?.addEventListener('click', () => {
+  const btn = document.getElementById('removeTagBtn');
+  const tagEl = btn._targetEl;
+  btn.style.display = 'none';
+  if (!tagEl || !sessionId) return;
+
+  const tagName     = tagEl.tagName.toLowerCase();
+  const isSmallCaps = tagName === 'span' && tagEl.classList.contains('small-caps');
+  const innerHTML   = tagEl.innerHTML;
+  const outerHTML   = tagEl.outerHTML;
+
+  fetch('/remove-tag-eraser', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id:    sessionId,
+      outer_html:    outerHTML,
+      inner_html:    innerHTML,
+      tag_name:      tagName,
+      is_small_caps: isSmallCaps
+    })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) { showToast(data.error, 'fail'); return; }
+    showToast('✓ Tag removed', 'pass');
+    refreshXhtml();
+  })
+  .catch(err => showToast('Remove failed: ' + err.message, 'fail'));
+});
+
+document.addEventListener('mousedown', e => {
+  const rtBtn = document.getElementById('removeTagBtn');
+  if (rtBtn && e.target !== rtBtn) rtBtn.style.display = 'none';
+});
 
 // Hide button on click outside iframe
 document.addEventListener('mousedown', e => {
@@ -1499,6 +2285,11 @@ async function toggleXhtmlEdit() {
         extraKeys: {
           "Ctrl-F": () => window._showCmSearch && window._showCmSearch(),
           "Escape": () => document.getElementById('cmSearchBar').style.display = 'none',
+          "Ctrl-Alt-B": () => wrapCmSelection('<b>', '</b>'),
+          "Ctrl-Alt-T": () => wrapCmSelection('<i>', '</i>'),
+          "Ctrl-Alt-=": () => wrapCmSelection('<sup>', '</sup>'),
+          "Ctrl-Alt--": () => wrapCmSelection('<sub>', '</sub>'),
+          "Ctrl-Alt-Q": () => wrapCmSelection('<span class="small-caps">', '</span>'),
         }
       });
       initCmSearch();
@@ -1550,6 +2341,19 @@ async function saveXhtmlEdit() {
     saveBtn.disabled = false;
     saveBtn.textContent = '💾 Save';
   }
+}
+
+function wrapCmSelection(open, close) {
+  if (!cmEditor) return;
+  const sel = cmEditor.getSelection();
+  if (sel) {
+    cmEditor.replaceSelection(open + sel + close);
+  } else {
+    const cur = cmEditor.getCursor();
+    cmEditor.replaceRange(open + close, cur);
+    cmEditor.setCursor({ line: cur.line, ch: cur.ch + open.length });
+  }
+  cmEditor.focus();
 }
 
 function initCmSearch() {
@@ -1733,6 +2537,15 @@ function applyXhtmlTagHighlights() {
       rules.push('sup { background: #66BFFF !important; outline: 1px solid #1a8fe0 !important; }');
     if (document.getElementById('hlSub')?.checked)
       rules.push('sub { background: #FF9933 !important; outline: 1px solid #cc6600 !important; }');
+    const hlSmallCaps = document.getElementById('hlSmallCaps');
+    if (hlSmallCaps?.checked)
+      rules.push('span.small-caps { background: #CC66FF !important; outline: 1px solid #9933cc !important; }');
+    const hlBlockquote = document.getElementById('hlBlockquote');
+    if (hlBlockquote?.checked)
+      rules.push('blockquote { background: rgba(255,107,107,0.15) !important; outline: 2px solid #FF6B6B !important; cursor:pointer !important; }');
+
+    // Always inject small-caps visual style (runtime only, not saved to file)
+    rules.push('.small-caps { font-variant: small-caps; font-size: 0.85em; letter-spacing: 0.05em; }');
 
     style.textContent = rules.join('\n');
   } catch(e) {
@@ -1740,7 +2553,7 @@ function applyXhtmlTagHighlights() {
   }
 }
 
-['hlBold','hlItalic','hlSup','hlSub'].forEach(id => {
+['hlBold','hlItalic','hlSup','hlSub','hlSmallCaps','hlBlockquote'].forEach(id => {
   document.getElementById(id)?.addEventListener('change', applyXhtmlTagHighlights);
 });
 
@@ -1803,3 +2616,101 @@ document.getElementById('highlightToggleBtn')?.addEventListener('click', () => {
     document.getElementById('searchBar').style.pointerEvents  = 'auto';
   }
 });
+
+// Shortcuts modal
+(function() {
+  const modal    = document.getElementById('shortcutsModal');
+  const closeBtn = document.getElementById('shortcutsClose');
+  const gotItBtn = document.getElementById('shortcutsGotIt');
+  const backdrop = document.getElementById('shortcutsBackdrop');
+  const dontShow = document.getElementById('shortcutsDontShow');
+  const openBtn  = document.getElementById('shortcutsBtn');
+
+  // Show on load unless user said don't show again
+  if (localStorage.getItem('shortcutsDontShow') === 'true') {
+    modal.style.display = 'none';
+  }
+
+  function closeModal() {
+    if (dontShow.checked) {
+      localStorage.setItem('shortcutsDontShow', 'true');
+    }
+    modal.style.display = 'none';
+  }
+
+  closeBtn.addEventListener('click', closeModal);
+  gotItBtn.addEventListener('click', closeModal);
+  backdrop.addEventListener('click', closeModal);
+
+  // Reopen via header button
+  openBtn.addEventListener('click', () => {
+    modal.style.display = 'flex';
+  });
+
+  // Close with Escape key
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && modal.style.display !== 'none') {
+      closeModal();
+    }
+  });
+})();
+
+// Blockquote modal handlers
+document.getElementById('blockquoteClose')?.addEventListener('click', () => {
+  document.getElementById('blockquoteModal').style.display = 'none';
+});
+document.getElementById('blockquoteCancel')?.addEventListener('click', () => {
+  document.getElementById('blockquoteModal').style.display = 'none';
+});
+document.getElementById('blockquoteBackdrop')?.addEventListener('click', () => {
+  document.getElementById('blockquoteModal').style.display = 'none';
+});
+
+// Save As-Is — save whatever is in the editor without converting
+document.getElementById('blockquoteSaveAsIs')?.addEventListener('click', () => {
+  if (!bqCmEditor || !window._bqOriginal) return;
+  const editedCode = bqCmEditor.getValue();
+  const updated = window._bqOriginal.substring(0, window._bqStart)
+    + editedCode
+    + window._bqOriginal.substring(window._bqEnd);
+  saveAndRefresh(updated);
+});
+
+// Fix to Poem-line — convert all inner <p class="..."> to
+// <p class="poemline"> and remove <blockquote> wrapper
+document.getElementById('blockquoteFixPoem')?.addEventListener('click', () => {
+  if (!bqCmEditor || !window._bqOriginal) return;
+  let code = bqCmEditor.getValue();
+
+  // Remove opening <blockquote...> tag
+  code = code.replace(/^<blockquote[^>]*>\s*/i, '');
+  // Remove closing </blockquote>
+  code = code.replace(/\s*<\/blockquote>\s*$/i, '');
+  // Change all inner <p class="..."> to <p class="poemline">
+  code = code.replace(/<p\s+class="[^"]*"/gi, '<p class="poemline"');
+  // Also handle <p> with no class
+  code = code.replace(/<p(?!\s*class)(\s*>)/gi, '<p class="poemline"$1');
+
+  const updated = window._bqOriginal.substring(0, window._bqStart)
+    + code
+    + window._bqOriginal.substring(window._bqEnd);
+
+  saveAndRefresh(updated);
+});
+
+// Helper: save and refresh
+function saveAndRefresh(content) {
+  fetch('/save-xhtml', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, content })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) { showToast(data.error, 'fail'); return; }
+    document.getElementById('blockquoteModal').style.display = 'none';
+    showToast('✓ Saved', 'pass');
+    refreshXhtml();
+  })
+  .catch(e => showToast('Save failed: ' + e.message, 'fail'));
+}

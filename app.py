@@ -637,6 +637,66 @@ def insert_image():
     })
 
 
-if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+@app.route("/remove-tag-eraser", methods=["POST"])
+def remove_tag_eraser():
+    data          = request.get_json(force=True)
+    session_id    = data.get("session_id")
+    outer_html    = data.get("outer_html", "").strip()
+    inner_html    = data.get("inner_html", "")
+    tag_name      = data.get("tag_name", "")
+    is_small_caps = data.get("is_small_caps", False)
 
+    if not session_id or session_id not in SESSIONS:
+        return jsonify({"error": "session not found"}), 400
+    if not outer_html or not tag_name:
+        return jsonify({"error": "missing tag info"}), 400
+
+    xhtml_path = Path(SESSIONS[session_id]["xhtml_path"])
+    original   = xhtml_path.read_text(encoding="utf-8", errors="ignore")
+
+    # Strategy 1: exact outerHTML match
+    if outer_html in original:
+        updated = original.replace(outer_html, inner_html, 1)
+        xhtml_path.write_text(updated, encoding="utf-8")
+        return jsonify({"success": True})
+
+    # Strategy 2: regex with exact inner content
+    escaped_inner = re.escape(inner_html)
+    if is_small_caps:
+        pattern = rf'<span[^>]*class=["\'][^"\']*small-caps[^"\']*["\'][^>]*>{escaped_inner}</span>'
+    else:
+        pattern = rf'<{re.escape(tag_name)}[^>]*>{escaped_inner}</{re.escape(tag_name)}>'
+
+    updated, count = re.subn(pattern, inner_html, original, count=1, flags=re.DOTALL)
+    if count > 0:
+        xhtml_path.write_text(updated, encoding="utf-8")
+        return jsonify({"success": True})
+
+    # Strategy 3: inner_html may contain nested tags — strip them to get plain text,
+    # then find the tag in source by matching plain text content loosely
+    plain_inner = re.sub(r'<[^>]+>', '', inner_html).strip()
+    if plain_inner:
+        escaped_plain = re.escape(plain_inner)
+        if is_small_caps:
+            pattern3 = rf'<span[^>]*class=["\'][^"\']*small-caps[^"\']*["\'][^>]*>[^<]*{escaped_plain}[^<]*</span>'
+        else:
+            pattern3 = rf'<{re.escape(tag_name)}[^>]*>[^<]*{escaped_plain}[^<]*</{re.escape(tag_name)}>'
+
+        match = re.search(pattern3, original, flags=re.DOTALL)
+        if match:
+            full_match = match.group(0)
+            # Extract actual inner content from the matched tag
+            inner_pattern = rf'<{re.escape(tag_name)}[^>]*>([\s\S]*?)</{re.escape(tag_name)}>'
+            inner_match = re.search(inner_pattern, full_match, flags=re.DOTALL)
+            actual_inner = inner_match.group(1) if inner_match else plain_inner
+            updated = original.replace(full_match, actual_inner, 1)
+            xhtml_path.write_text(updated, encoding="utf-8")
+            return jsonify({"success": True})
+
+    return jsonify({"error": "Could not find tag in source — try editing manually"}), 400
+
+
+if __name__ == "__main__":
+    app.run(port=5001, debug=True)        
+ 
+                              
