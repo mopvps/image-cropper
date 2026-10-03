@@ -579,7 +579,7 @@ def save_xhtml():
 def insert_image():
     data       = request.get_json(force=True)
     session_id = data.get("session_id")
-    after_filename = data.get("after_filename")  # e.g. ch7-inline-22.png
+    after_filename = data.get("after_filename")  # e.g. ch7-inline-22.png or photo.png
 
     if not session_id or not after_filename:
         return jsonify({"error": "invalid request"}), 400
@@ -589,26 +589,32 @@ def insert_image():
     xhtml_path = Path(SESSIONS[session_id]["xhtml_path"])
     xhtml_text = xhtml_path.read_text(encoding="utf-8", errors="ignore")
 
-    # Find all inline numbers in the entire XHTML to get the last used number
-    all_numbers = re.findall(r'ch\w+-inline-(\d+)\.png', xhtml_text)
-    if not all_numbers:
-        return jsonify({"error": "no inline images found"}), 400
+    # Detect prefix/number/padding/ext from after_filename
+    trail_match = re.match(r'^(.*?)(\d+)(\.[^.]+)$', after_filename)
+    if trail_match:
+        prefix   = trail_match.group(1)
+        pad      = len(trail_match.group(2))
+        ext      = trail_match.group(3)
+        start_num = int(trail_match.group(2))
+    else:
+        stem, ext = os.path.splitext(after_filename)
+        ext      = ext or ".png"
+        prefix   = f"{stem}-"
+        pad      = 1
+        start_num = 2
 
-    last_num  = max(int(n) for n in all_numbers)
-    new_num   = last_num + 1
+    # Find highest used number across all images sharing the same prefix
+    num_pattern  = rf'{re.escape(prefix)}(\d+){re.escape(ext)}'
+    all_numbers  = re.findall(num_pattern, xhtml_text, re.IGNORECASE)
+    if all_numbers:
+        last_num = max(int(n) for n in all_numbers)
+        new_num  = last_num + 1
+    else:
+        new_num  = start_num
 
-    # Build new filename using same prefix as after_filename
-    # e.g. ch7-inline-22.png -> prefix = ch7-inline
-    prefix_match = re.match(r'(.+-inline)-\d+\.png', after_filename)
-    if not prefix_match:
-        return jsonify({"error": "filename pattern not recognized"}), 400
-
-    prefix       = prefix_match.group(1)
-    new_filename = f"{prefix}-{new_num:02d}.png"
+    new_filename = f"{prefix}{str(new_num).zfill(pad)}{ext}"
 
     # Build the new img tag — match style from existing tag
-    # Find the after_filename tag to copy its attributes
-    src_base = after_filename  # just filename, src may have images/ prefix
     pattern  = rf'(<img\s[^>]*src=["\'][^"\']*{re.escape(after_filename)}["\'][^>]*/>)'
     match    = re.search(pattern, xhtml_text, re.IGNORECASE)
 

@@ -865,6 +865,14 @@ function initSelectionEdit() {
       doc.body.setAttribute('spellcheck', 'false');
       doc.body.style.outline = 'none';
       doc.body.style.caretColor = '#2B3A9C';
+
+      // ── Highlight all images with yellow background so they are visible ──
+      const allImgs = doc.querySelectorAll('img');
+      allImgs.forEach(img => {
+        img.style.backgroundColor = '#FFF9C4';
+        img.style.outline = '1px dashed #F0C000';
+        img.style.padding = '2px';
+      });
       doc.addEventListener('beforeinput', e => e.preventDefault(), true);
 
       doc.addEventListener('mouseup', onIframeMouseUp);
@@ -876,6 +884,52 @@ function initSelectionEdit() {
         else if (e.altKey && e.code === 'Equal') { e.preventDefault(); wrapIframeSelection('<sup>', '</sup>'); }
         else if (e.altKey && e.code === 'Minus') { e.preventDefault(); wrapIframeSelection('<sub>', '</sub>'); }
         else if (e.altKey && e.code === 'KeyQ') { e.preventDefault(); wrapIframeSelection('<span class="small-caps">', '</span>'); }
+      });
+
+      // ── Image click highlight ──────────────────────────────
+      let highlightedImg = null;
+
+      doc.addEventListener('mousedown', e => {
+        const img = e.target.closest('img');
+
+        // Clear previous highlight
+        if (highlightedImg) {
+          highlightedImg.style.outline = '1px dashed #F0C000';
+          highlightedImg.style.outlineOffset = '';
+          highlightedImg.style.boxShadow = '';
+          highlightedImg.style.borderRadius = '';
+          highlightedImg.style.backgroundColor = '#FFF9C4';
+          if (highlightedImg === img) {
+            // Clicked same image — deselect
+            highlightedImg = null;
+            selectedImage = null;
+            renderChips();
+            return;
+          }
+        }
+
+        if (!img) return;
+
+        // Highlight clicked image with light outline only
+        img.style.outline = '2px solid rgba(43,58,156,0.5)';
+        img.style.outlineOffset = '3px';
+        img.style.boxShadow = '0 0 0 4px rgba(43,58,156,0.08)';
+        img.style.borderRadius = '2px';
+        highlightedImg = img;
+
+        // Get filename from src
+        const src = img.getAttribute('src') || '';
+        const filename = src.split('/').pop().split('?')[0];
+        if (!filename) return;
+
+        // Select matching chip in right panel
+        selectedImage = filename;
+        renderChips();
+
+        // Scroll chip into view
+        const chip = [...document.querySelectorAll('.chip')]
+          .find(c => c.title === filename);
+        if (chip) chip.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       });
 
       // Blockquote click handler — only active when hlBlockquote is checked
@@ -1426,10 +1480,12 @@ function wrapIframeSelection(open, close) {
 
     // ── WRAP ─────────────────────────────────────────────────
     // Get DOM index of parent <p> to scope the search
+    const BLOCK_TAGS = new Set(['P','H1','H2','H3','H4','H5','H6','LI','TD','TH','LABEL','DIV','BLOCKQUOTE','SECTION']);
     let pEl = range.commonAncestorContainer;
     if (pEl.nodeType === Node.TEXT_NODE) pEl = pEl.parentNode;
-    while (pEl && pEl.nodeName.toUpperCase() !== 'P') pEl = pEl.parentNode;
-    const allP   = pEl ? Array.from(doc.querySelectorAll('p')) : [];
+    while (pEl && !BLOCK_TAGS.has(pEl.nodeName.toUpperCase())) pEl = pEl.parentNode;
+    const blockTag = pEl ? pEl.nodeName.toLowerCase() : 'p';
+    const allP   = pEl ? Array.from(doc.querySelectorAll(blockTag)) : [];
     const pIndex = pEl ? allP.indexOf(pEl) : -1;
 
     // Safe ASCII anchors from text nodes around selection
@@ -1484,7 +1540,7 @@ function wrapIframeSelection(open, close) {
 
       // Find paragraph scope in source using DOM index
       function findNthP(source, n) {
-        const pat = /<p[\s>]/g;
+        const pat = new RegExp('<' + blockTag + '[\\s>]', 'g');
         let count = 0, m;
         while ((m = pat.exec(source)) !== null) {
           if (count === n) return m.index;
@@ -1506,7 +1562,9 @@ function wrapIframeSelection(open, close) {
       const scope = original.substring(searchStart, searchEnd);
 
       // Strategy A: anchor-based within paragraph scope
-      if (beforeAnchor || afterAnchor) {
+      // Require BOTH anchors — if only one side is available the lazy regex
+      // captures the minimum (1 char) instead of the full selection.
+      if (beforeAnchor && afterAnchor) {
         const pat = new RegExp(
           (beforeAnchor ? escapeRe(beforeAnchor) : '') +
           '([\\s\\S]{1,400}?)' +
@@ -1522,7 +1580,8 @@ function wrapIframeSelection(open, close) {
       }
 
       // Strategy B: exact selectedText within scope
-      if (updated === null && scope.includes(selectedText)) {
+      // Only run when pIndex !== -1 so scope is a real block element, not the whole file
+      if (updated === null && pIndex !== -1 && scope.includes(selectedText)) {
         const idx = scope.indexOf(selectedText);
         const scopeUpdated = scope.substring(0, idx) + open + selectedText + close + scope.substring(idx + selectedText.length);
         updated = original.substring(0, searchStart) + scopeUpdated + original.substring(searchEnd);
